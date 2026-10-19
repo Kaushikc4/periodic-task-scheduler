@@ -97,7 +97,11 @@ def run_jobs(jobs, now):
         update_last_run_time(job.get('job_name'), now)
 
 def schedule_jobs():
-    """Main entry point to schedule eligible jobs."""
+    """Entry point to schedule eligible jobs."""
     now = arrow.now('Asia/Kolkata')
     jobs = load_jobs()
     run_jobs(jobs, now)
+
+def lambda_handler(event, context):
+    """Main Entry Point for the lambda function."""
+    schedule_jobs()
