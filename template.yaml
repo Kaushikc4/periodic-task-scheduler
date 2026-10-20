@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Periodic task scheduler - one Lambda that triggers other Lambdas / Step Functions based on jobs in DynamoDB.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: ECR image URI (with digest or tag) for the scheduler Lambda.
+  ScheduleExpression:
+    Type: String
+    Default: cron(30 20 * * ? *)
+    Description: When the scheduler checks for due jobs (Asia/Kolkata time). Currently once a day at 20:30.
+  TableName:
+    Type: String
+    Default: periodic-task-scheduler-jobs
+
+Resources:
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: job_name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_name
+          KeyType: HASH
+
+  SchedulerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: periodic-task-scheduler
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:Scan, dynamodb:UpdateItem]
+                Resource: !GetAtt JobsTable.Arn
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Sub arn:aws:states:*:${AWS::AccountId}:stateMachine:*
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:*:${AWS::AccountId}:function:*
+
+  SchedulerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: periodic-task-scheduler
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      Architectures: [x86_64]
+      Role: !GetAtt SchedulerFunctionRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref JobsTable
+          REGION_NAME: !Ref AWS::Region
+          LAMBDA_FUNC_REGION_NAME: !Ref AWS::Region
+          STEP_FUNC_REGION_NAME: !Ref AWS::Region
+
+  SchedulerFunctionAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref SchedulerFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 0
+
+  ScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-scheduler-function
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt SchedulerFunction.Arn
+
+  Schedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: periodic-task-scheduler-tick
+      ScheduleExpression: !Ref ScheduleExpression
+      ScheduleExpressionTimezone: Asia/Kolkata
+      FlexibleTimeWindow: { Mode: 'OFF' }
+      Target:
+        Arn: !GetAtt SchedulerFunction.Arn
+        RoleArn: !GetAtt ScheduleRole.Arn
+        RetryPolicy: { MaximumRetryAttempts: 0 }
+
+Outputs:
+  FunctionArn:
+    Value: !GetAtt SchedulerFunction.Arn
+  TableName:
+    Value: !Ref JobsTable
